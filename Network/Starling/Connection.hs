@@ -37,9 +37,11 @@ module Network.Starling.Connection
 import Network.Starling.Core
 
 import Control.Concurrent (forkIO)
-import Control.Concurrent.Chan
+import Control.Concurrent.STM.TChan
+import Control.Monad.STM
 import Control.Concurrent.MVar
-import Control.Exception (handle)
+import Control.Exception (catch)
+import Prelude hiding (catch)
 import Data.IORef
 
 import System.IO
@@ -54,7 +56,7 @@ import qualified Data.ByteString.Lazy as BS
 data Connection = Conn 
     { con_lock :: MVar ()
     , con_h :: Handle
-    , con_q :: Chan QItem
+    , con_q :: TChan QItem
     , con_opaque :: IORef Opaque
     }
 
@@ -72,26 +74,26 @@ open :: Handle -> IO Connection
 open h
     = do
   lock <- newMVar ()
-  queue <- newChan
+  queue <- atomically newTChan
   opaque <- newIORef 0
-  forkIO $ flip handle (readLoop h queue) $ \StarlingReadError ->
+  forkIO $ catch (readLoop h queue) $ \StarlingReadError ->
       return ()
   return $ Conn lock h queue opaque
            
 -- | Process the callback queue
-readLoop :: Handle -> Chan QItem -> IO ()
+readLoop :: Handle -> TChan QItem -> IO ()
 readLoop h q
     = do
   response <- getResponse h
   tryNextQItem h q response $ readLoop h q
 
-tryNextQItem :: Handle -> Chan QItem -> Response -> IO () -> IO ()
+tryNextQItem :: Handle -> TChan QItem -> Response -> IO () -> IO ()
 tryNextQItem h q response k
     = do
-  qItem <- readChan q
+  qItem <- atomically $ readTChan q
  
   case compareOpaque response qItem of
-    KeepQ -> unGetChan q qItem >> k
+    KeepQ -> atomically ( unGetTChan q qItem ) >> k 
     KeepR -> tryNextQItem h q response k
     Match -> processResponse h q response qItem k
     Done  -> return ()
@@ -110,6 +112,8 @@ compareOpaque response qItem
               LT -> KeepQ
               GT -> KeepQ
 
+
+qOpaque :: QItem -> Maybe Opaque
 qOpaque QDone = Nothing
 qOpaque (QHandleResp ident _) = Just ident
 qOpaque (QHandleMulti ident _) = Just ident
@@ -120,7 +124,7 @@ data CompareResult
     | Match
     | Done
 
-processResponse :: Handle -> Chan QItem
+processResponse :: Handle -> TChan QItem
                 -> Response -> QItem -> IO () -> IO ()
 processResponse h q response qItem k
     = case qItem of
@@ -143,8 +147,8 @@ takeResponses ident h
           else return (reverse xs, response)
 
 withConLock :: Connection -> IO a -> IO a
-withConLock Conn{..} k
-    = withMVar_ con_lock k
+withConLock Conn{..}
+    = withMVar_ con_lock
 
 withMVar_ :: MVar a -> IO b -> IO b
 withMVar_ mvar f = withMVar mvar $ const f
@@ -213,4 +217,4 @@ nextOpaque Conn{..} = do
 -- | Add an item on the callback queue
 enqueue :: Connection -> QItem -> IO ()
 enqueue Conn{..} item
-    = writeChan con_q item
+    = atomically $ writeTChan con_q item
