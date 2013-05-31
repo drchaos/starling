@@ -24,8 +24,8 @@ cabal-version:   >= 1.8
 extra-source-files: CHANGES
 
 source-repository head
- type:     darcs
- location: http://community.haskell.org/~aslatter/code/starling
+ type:     git
+ location: https://github.com/drchaos/starling
 
 library
   build-depends:   base == 4.*
@@ -39,3 +39,20 @@ library
         Network.Starling
         Network.Starling.Core
         Network.Starling.Connection
+
+test-suite test
+    type:              exitcode-stdio-1.0
+    main-is:           Test.hs
+    ghc-options:       -Wall
+
+    build-depends:
+        base ,
+        network ,
+        process ,
+        failure ,
+        transformers ,
+        bytestring ,
+        binary ,
+        stm ,
+        starling ,
+        HUnit

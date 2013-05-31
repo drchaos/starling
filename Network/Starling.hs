@@ -1,6 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable,
-      FlexibleContexts
-      #-}
+{-# LANGUAGE DeriveDataTypeable, FlexibleContexts , ScopedTypeVariables #-}
 
 {-|
 
@@ -84,6 +82,8 @@ import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as BS8
 import qualified Data.Binary.Get as B
+import qualified Data.Binary as B
+import Data.Binary (Binary)
 
 import Data.Word
 import Data.Typeable
@@ -105,31 +105,44 @@ instance Show StarlingError where
 instance Exception StarlingError
 
 -- | Set a value in the cache
-set :: (MonadIO m, Failure StarlingError m)
-       => Connection -> Word32 -> Key -> Value -> m ()
-set con expiry key value = simpleRequest con (Core.set expiry key value) (const ())
+set :: (MonadIO m, Failure StarlingError m, Binary v, Binary k)
+       => Connection -> Word32 -> k -> v -> m ()
+set con expiry k v = simpleRequest con (Core.set expiry key value) (const ())
+  where
+    key = B.encode k
+    value = B.encode v
 
--- | Set a vlue in the cache. Fails if a value is already defined
+-- | Set a value in the cache. Fails if a value is already defined
 -- for the indicated key.
-add :: (MonadIO m, Failure StarlingError m) =>
-       Connection -> Word32 -> Key -> Value -> m ()
-add con expiry key value = simpleRequest con (Core.add expiry key value) (const ())
+add :: (MonadIO m, Failure StarlingError m, Binary v, Binary k)
+       => Connection -> Word32 -> k -> v -> m ()
+add con expiry k v = simpleRequest con (Core.add expiry key value) (const ())
+  where
+    key = B.encode k
+    value = B.encode v
 
 -- | Set a value in the cache. Fails if a value is not already defined
 -- for the indicated key.
-replace :: (MonadIO m, Failure StarlingError m) =>
-           Connection -> Word32 -> Key -> Value -> m ()
-replace con expiry key value = simpleRequest con (Core.replace expiry key value) (const ())
+replace :: (MonadIO m, Failure StarlingError m, Binary v, Binary k)
+           => Connection -> Word32 -> k -> v -> m ()
+replace con expiry k v = simpleRequest con (Core.replace expiry key value) (const ())
+  where
+    key = B.encode k
+    value = B.encode v
 
 -- | Retrive a value from the cache
-get :: (MonadIO m, Failure StarlingError m) =>
-       Connection -> Key -> m ByteString
-get con key = simpleRequest con (Core.get key) rsBody
+get :: (MonadIO m, Failure StarlingError m, Binary k, Binary v) =>
+       Connection -> k -> m (Maybe v)
+get con k = simpleRequestGet con (Core.get key) (B.decode . rsBody)
+  where
+    key = B.encode k
 
 -- | Delete an entry in the cache
-delete :: (MonadIO m, Failure StarlingError m) =>
-          Connection -> Key -> m ()
-delete con key = simpleRequest con (Core.delete key) (const ())
+delete :: (MonadIO m, Failure StarlingError m, Binary k) =>
+          Connection -> k -> m ()
+delete con k = simpleRequest con (Core.delete key) (const ())
+  where
+    key = B.encode k
 
 -- | Update a value in the cache. This operation requires two round trips.
 -- This operation can fail if the key is not present in the cache, or if
@@ -139,47 +152,62 @@ delete con key = simpleRequest con (Core.delete key) (const ())
 --
 -- Testing indicates that if we fail because we could not gaurantee
 -- atomicity the failure code will be 'KeyExists'.
-update :: (MonadIO m, Failure StarlingError m) =>
-          Connection -> Word32 -> Key -> (Value -> m (Maybe Value)) -> m ()
-update con expiry key f
-    = do
-  response <- liftIO $ synchRequest con (Core.get key)
-  case rsStatus response of
-    NoError -> do
-        let oldVal = rsBody response
-            cas = rsCas response
-        res <- f oldVal
-        let baseRequest = case res of
-                            Nothing -> Core.delete key
-                            Just newVal -> Core.replace expiry key newVal
-            request = addCAS cas $ baseRequest
-        simpleRequest con request (const ())
-    _ -> errorResult response
+update :: (MonadIO m, Failure StarlingError m, Binary k) =>
+          Connection -> Word32 -> k -> (Value -> m (Maybe Value)) -> m ()
+update con expiry k f = do
+    response <- liftIO $ synchRequest con (Core.get key)
+    case rsStatus response of
+        NoError -> do
+            let oldVal = rsBody response
+                cas = rsCas response
+            res <- f oldVal
+            let baseRequest = case res of
+                                Nothing -> Core.delete key
+                                Just newVal -> Core.replace expiry key newVal
+                request = addCAS cas baseRequest
+            simpleRequest con request (const ())
+        _ -> errorResult response
+  where
+    key = B.encode k
 
 -- | Increment a value in the cache. The first 'Word64' argument is the
 -- amount by which to increment and the second is the intial value to
 -- use if the key does not yet have a value.
 -- The return value is the updated value in the cache.
-increment :: (MonadIO m, Failure StarlingError m) =>
-             Connection -> Key -> Word64 -> Word64 -> m Word64
-increment con key amount init
+increment :: (MonadIO m, Failure StarlingError m, Binary k) =>
+             Connection -> k -> Word64 -> Word64 -> m Word64
+increment con k amount init
     = simpleRequest con (Core.increment key amount init) $ \response ->
       B.runGet B.getWord64be (rsBody response)
+  where
+    key = B.encode k
 
 -- | Decrement a value in the cache. The first 'Word64' argument is the
 -- amount by which to decrement and the second is the intial value to
 -- use if the key does not yet have a value.
 -- The return value is the updated value in the cache.
-decrement :: (MonadIO m, Failure StarlingError m) =>
-             Connection -> Key -> Word64 -> Word64 -> m Word64
-decrement con key amount init
+decrement :: (MonadIO m, Failure StarlingError m, Binary k) =>
+             Connection -> k -> Word64 -> Word64 -> m Word64
+decrement con k amount init
     = simpleRequest con (Core.decrement key amount init) $ \response ->
       B.runGet B.getWord64be (rsBody response)
+  where
+    key = B.encode k
 
 -- | Delete all entries in the cache
 flush :: (MonadIO m, Failure StarlingError m) =>
          Connection -> m ()
 flush con = simpleRequest con Core.flush (const ())
+
+simpleRequestGet :: (MonadIO m, Failure StarlingError m) =>
+                 Connection -> Request -> (Response -> a) -> m (Maybe a)
+simpleRequestGet con req f
+    = do
+  response <- liftIO $ synchRequest con req
+  case rsStatus response of
+      NoError -> return . Just $ f response
+      KeyNotFound -> return Nothing
+      _ -> errorResult response
 
 simpleRequest :: (MonadIO m, Failure StarlingError m) =>
                  Connection -> Request -> (Response -> a) -> m a
@@ -190,6 +218,7 @@ simpleRequest con req f
    then return . f $ response
    else errorResult response
 
+errorResult :: (Failure StarlingError m) => Response -> m v
 errorResult response = failure $ StarlingError (rsStatus response) (rsBody response)
 
 -- | Returns a list of stats about the server in key,value pairs
@@ -213,9 +242,9 @@ stats con
 
 -- | Returns a single stat. Example: 'stat con "pid"' will return
 -- the 
-oneStat :: (MonadIO m, Failure StarlingError m) =>
-           Connection -> Key -> m ByteString
-oneStat con key = simpleRequest con (Core.stat $ Just key) rsBody
+--oneStat :: (MonadIO m, Failure StarlingError m) =>
+--           Connection -> Key -> m ByteString
+--oneStat con key = simpleRequest con (Core.stat $ Just key) rsBody
 
 -- | List allowed SASL mechanisms. The server must support SASL
 -- authentication.
@@ -236,22 +265,22 @@ auth :: (MonadIO m, Failure StarlingError m) =>
         Connection -> AuthMechanism -> AuthData -> Maybe (AuthCallback m) -> m Bool
 auth con mech auth authCallback
     = auth' Core.startAuth con mech auth authCallback
-
-auth' req con mech auth authCallback = do
-  response <- liftIO $ synchRequest con $ req mech auth
-  case rsStatus response of
-    NoError -> return True
-    AuthRequired -> return False
-    FurtherAuthRequired
-        -> do
-      case authCallback of
-        Nothing -> errorResult response
-        Just (AuthCallback f) -> do
-                           next <- f (rsBody response)
-                           case next of
-                             (newAuth, newCallback)
-                                     -> auth' Core.stepAuth con mech newAuth newCallback
-    _ -> errorResult response
+  where
+    auth' req con mech auth authCallback = do
+      response <- liftIO $ synchRequest con $ req mech auth
+      case rsStatus response of
+        NoError -> return True
+        AuthRequired -> return False
+        FurtherAuthRequired
+            -> 
+          case authCallback of
+            Nothing -> errorResult response
+            Just (AuthCallback f) -> do
+                               next <- f (rsBody response)
+                               case next of
+                                 (newAuth, newCallback)
+                                         -> auth' Core.stepAuth con mech newAuth newCallback
+        _ -> errorResult response
         
 
 -- | Returns the version of the server
